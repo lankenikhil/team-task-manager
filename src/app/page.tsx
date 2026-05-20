@@ -61,6 +61,7 @@ export default function HomePage() {
             </div>
             <h1 className="mt-4 text-2xl font-bold">TaskFlow</h1>
             <p className="text-muted-foreground">Team Task Manager</p>
+            <p className="text-xs text-muted-foreground/50 mt-1">Created by Nikhil Lanke</p>
           </div>
           {showSignup ? (
             <SignupForm onSwitchToLogin={() => setShowSignup(false)} />

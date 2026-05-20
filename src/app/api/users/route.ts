@@ -1,48 +1,68 @@
+/**
+ * Users API Route
+ *
+ * GET - List all users with task and project counts (admin only).
+ * Used by the Team Members page and project member management.
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { verifyToken, getTokenFromCookies } from '@/lib/auth'
+import connectDB from '@/lib/mongodb'
+import User from '@/models/User'
+import Task from '@/models/Task'
+import ProjectMember from '@/models/ProjectMember'
+import { getAuthUser } from '@/lib/api-auth'
 
-async function getAuthUser(request: NextRequest) {
-  const cookieHeader = request.headers.get('cookie')
-  const token = getTokenFromCookies(cookieHeader)
-  if (!token) return null
-  const payload = verifyToken(token)
-  if (!payload) return null
-  return payload
-}
-
-// GET /api/users - List all users
+// GET /api/users - List all users with counts
 export async function GET(request: NextRequest) {
   try {
-    const auth = await getAuthUser(request)
+    await connectDB()
+
+    const auth = getAuthUser(request)
     if (!auth) {
-      return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
+      return NextResponse.json(
+        { success: false, error: 'Not authenticated' },
+        { status: 401 }
+      )
     }
 
     if (auth.role !== 'admin') {
-      return NextResponse.json({ success: false, error: 'Only admins can view all users' }, { status: 403 })
+      return NextResponse.json(
+        { success: false, error: 'Only admins can view all users' },
+        { status: 403 }
+      )
     }
 
-    const users = await db.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-        _count: {
-          select: {
-            assignedTasks: true,
-            projectMembers: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    })
+    // Fetch all users (excluding passwords)
+    const users = await User.find({}).select('-password').sort({ createdAt: -1 })
 
-    return NextResponse.json({ success: true, data: users })
+    // Build response with task and project counts for each user
+    const data = await Promise.all(
+      users.map(async (user) => {
+        const [assignedTasks, projectMembers] = await Promise.all([
+          Task.countDocuments({ assignedToId: user._id }),
+          ProjectMember.countDocuments({ userId: user._id }),
+        ])
+
+        return {
+          id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          createdAt: user.createdAt,
+          _count: {
+            assignedTasks,
+            projectMembers,
+          },
+        }
+      })
+    )
+
+    return NextResponse.json({ success: true, data })
   } catch (error) {
     console.error('Get users error:', error)
-    return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 })
+    return NextResponse.json(
+      { success: false, error: 'Internal server error' },
+      { status: 500 }
+    )
   }
 }

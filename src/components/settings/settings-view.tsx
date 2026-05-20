@@ -127,6 +127,25 @@ export function SettingsView() {
           </Button>
         </CardContent>
       </Card>
+
+      <Separator />
+
+      {/* About Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">About</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">
+              TaskFlow — Team Task Manager
+            </p>
+            <p className="text-xs text-muted-foreground/60">
+              Created by Nikhil Lanke
+            </p>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }

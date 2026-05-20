@@ -124,6 +124,13 @@ export function SidebarNav() {
             )}
           </div>
         </div>
+
+        {/* Creator credit */}
+        {sidebarOpen && (
+          <div className="border-t px-4 py-2">
+            <p className="text-[10px] text-muted-foreground/60 text-center">Created by Nikhil Lanke</p>
+          </div>
+        )}
       </aside>
 
       {/* Mobile trigger */}

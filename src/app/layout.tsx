@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "TaskFlow - Team Task Manager",
-  description: "A clean and simple team task management system. Create projects, manage teams, assign tasks, and track progress.",
-  keywords: ["task manager", "project management", "team collaboration"],
+  title: "TaskFlow - Team Task Manager | Created by Nikhil Lanke",
+  description: "A clean and simple team task management system. Create projects, manage teams, assign tasks, and track progress. Created by Nikhil Lanke.",
+  keywords: ["task manager", "project management", "team collaboration", "Nikhil Lanke"],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
