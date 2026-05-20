@@ -4,14 +4,18 @@
  * Creates a new user account with hashed password,
  * generates a JWT token, and sets it as an HTTP-only cookie.
  * Validates email uniqueness and password length.
+ * Uses Mongoose + MongoDB Atlas.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import connectDB from '@/lib/mongodb'
+import User from '@/models/User'
 import { hashPassword, signToken } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
+    await connectDB()
+
     const body = await request.json()
     const { name, email, password, role } = body
 
@@ -32,7 +36,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if email already exists
-    const existing = await db.user.findUnique({ where: { email } })
+    const existing = await User.findOne({ email })
     if (existing) {
       return NextResponse.json(
         { success: false, error: 'Email already exists' },
@@ -42,30 +46,30 @@ export async function POST(request: NextRequest) {
 
     // Hash the password and create the user
     const hashedPassword = await hashPassword(password)
-    const user = await db.user.create({
-      data: {
-        name,
-        email,
-        password: hashedPassword,
-        role: role === 'admin' ? 'admin' : 'member',
-      },
+    const user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      role: role === 'admin' ? 'admin' : 'member',
     })
 
     console.log(`✅ User created: ${user.email} (${user.role})`)
 
     // Generate JWT token
     const token = signToken({
-      userId: user.id,
+      userId: user._id.toString(),
       email: user.email,
       role: user.role,
     })
 
     // Build response with user data (excluding password)
+    // Include both id and userId for frontend compatibility
     const response = NextResponse.json({
       success: true,
       data: {
         user: {
-          id: user.id,
+          id: user._id.toString(),
+          userId: user._id.toString(),
           name: user.name,
           email: user.email,
           role: user.role,

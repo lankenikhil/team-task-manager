@@ -47,9 +47,6 @@ const UserSchema = new Schema<IUser>(
   }
 )
 
-// Create index for faster email lookups during authentication
-UserSchema.index({ email: 1 })
-
 // Prevent re-compilation in development (hot reload safety)
 const User = mongoose.models.User || mongoose.model<IUser>('User', UserSchema)
 

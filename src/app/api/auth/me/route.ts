@@ -3,17 +3,17 @@
  *
  * Returns the currently authenticated user's profile.
  * Reads the JWT token from the cookie header and verifies it.
- * Used by the frontend to check session status on page load.
+ * Uses Mongoose + MongoDB Atlas.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import connectDB from '@/lib/mongodb'
+import User from '@/models/User'
 import { verifyToken, getTokenFromCookies } from '@/lib/auth'
 
 export async function GET(request: NextRequest) {
   try {
     // Extract and verify token from cookies BEFORE connecting to DB
-    // This avoids unnecessary DB connections for unauthenticated requests
     const cookieHeader = request.headers.get('cookie')
     const token = getTokenFromCookies(cookieHeader)
 
@@ -32,17 +32,10 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    await connectDB()
+
     // Find user by ID from token (exclude password)
-    const user = await db.user.findUnique({
-      where: { id: payload.userId },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
-    })
+    const user = await User.findById(payload.userId).select('-password')
 
     if (!user) {
       return NextResponse.json(
@@ -53,7 +46,14 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      data: user,
+      data: {
+        id: user._id.toString(),
+        userId: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+      },
     })
   } catch (error: unknown) {
     const err = error as Error

@@ -3,14 +3,18 @@
  *
  * Authenticates a user with email and password,
  * generates a JWT token, and sets it as an HTTP-only cookie.
+ * Uses Mongoose + MongoDB Atlas.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import connectDB from '@/lib/mongodb'
+import User from '@/models/User'
 import { comparePassword, signToken } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
+    await connectDB()
+
     const body = await request.json()
     const { email, password } = body
 
@@ -23,7 +27,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Find user by email
-    const user = await db.user.findUnique({ where: { email } })
+    const user = await User.findOne({ email })
     if (!user) {
       console.log(`⚠️ Login attempt with unregistered email: ${email}`)
       return NextResponse.json(
@@ -46,17 +50,19 @@ export async function POST(request: NextRequest) {
 
     // Generate JWT token
     const token = signToken({
-      userId: user.id,
+      userId: user._id.toString(),
       email: user.email,
       role: user.role,
     })
 
     // Build response with user data (excluding password)
+    // Include both id and userId for frontend compatibility
     const response = NextResponse.json({
       success: true,
       data: {
         user: {
-          id: user.id,
+          id: user._id.toString(),
+          userId: user._id.toString(),
           name: user.name,
           email: user.email,
           role: user.role,

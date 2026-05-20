@@ -3,66 +3,57 @@
  *
  * GET  - List projects (admins see all, members see only their projects)
  * POST - Create a new project (admin only). Creator is auto-added as member.
+ * Uses Mongoose + MongoDB Atlas.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import connectDB from '@/lib/mongodb'
+import Project from '@/models/Project'
+import ProjectMember from '@/models/ProjectMember'
+import User from '@/models/User'
+import Task from '@/models/Task'
 import { getAuthUser } from '@/lib/api-auth'
 
 /**
- * Helper: Build a project response object using Prisma's include result.
- * Prisma handles population automatically via include, so we just
- * format the result to match the expected API response shape.
+ * Helper: Format a Mongoose project document into the API response shape.
+ * Includes createdBy, members with user info, and task/member counts.
  */
-function buildProjectResponse(project: Awaited<ReturnType<typeof db.project.findUnique<{ include: { createdBy: true, members: { include: { user: true } }, _count: { select: { tasks: true, members: true } } } }>>>) {
-  if (!project) return null
-
+function formatProject(project: any, createdBy: any, members: any[], taskCount: number, memberCount: number) {
   return {
-    id: project.id,
+    id: project._id.toString(),
     title: project.title,
     description: project.description,
-    createdById: project.createdById,
+    createdById: project.createdById.toString(),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
-    createdBy: project.createdBy
+    createdBy: createdBy
       ? {
-          id: project.createdBy.id,
-          name: project.createdBy.name,
-          email: project.createdBy.email,
-          role: project.createdBy.role,
+          id: createdBy._id.toString(),
+          name: createdBy.name,
+          email: createdBy.email,
+          role: createdBy.role,
         }
       : null,
-    members: project.members.map((pm) => ({
-      id: pm.id,
-      userId: pm.userId,
-      projectId: pm.projectId,
+    members: members.map((pm: any) => ({
+      id: pm._id.toString(),
+      userId: pm.userId._id ? pm.userId._id.toString() : pm.userId.toString(),
+      projectId: pm.projectId._id ? pm.projectId._id.toString() : pm.projectId.toString(),
       createdAt: pm.createdAt,
-      user: pm.user
+      user: pm.populatedUser
         ? {
-            id: pm.user.id,
-            name: pm.user.name,
-            email: pm.user.email,
-            role: pm.user.role,
+            id: pm.populatedUser._id.toString(),
+            name: pm.populatedUser.name,
+            email: pm.populatedUser.email,
+            role: pm.populatedUser.role,
           }
         : null,
     })),
     _count: {
-      tasks: project._count.tasks,
-      members: project._count.members,
+      tasks: taskCount,
+      members: memberCount,
     },
   }
 }
-
-// Shared Prisma include for project queries
-const projectInclude = {
-  createdBy: { select: { id: true, name: true, email: true, role: true } },
-  members: {
-    include: {
-      user: { select: { id: true, name: true, email: true, role: true } },
-    },
-  },
-  _count: { select: { tasks: true, members: true } },
-} as const
 
 // GET /api/projects - List projects
 export async function GET(request: NextRequest) {
@@ -75,29 +66,48 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    await connectDB()
+
     let projects
 
     if (auth.role === 'admin') {
       // Admins can see all projects
-      projects = await db.project.findMany({
-        orderBy: { createdAt: 'desc' },
-        include: projectInclude,
-      })
+      projects = await Project.find().sort({ createdAt: -1 }).lean()
     } else {
       // Members see only projects they created or are members of
-      projects = await db.project.findMany({
-        where: {
-          OR: [
-            { createdById: auth.userId },
-            { members: { some: { userId: auth.userId } } },
-          ],
-        },
-        orderBy: { createdAt: 'desc' },
-        include: projectInclude,
-      })
+      const memberEntries = await ProjectMember.find({ userId: auth.userId }).select('projectId').lean()
+      const memberProjectIds = memberEntries.map(m => m.projectId)
+      const createdProjects = await Project.find({ createdById: auth.userId }).select('_id').lean()
+      const createdProjectIds = createdProjects.map(p => p._id)
+
+      const allProjectIds = [...new Set([...memberProjectIds.map(id => id.toString()), ...createdProjectIds.map(id => id.toString())])]
+
+      projects = await Project.find({ _id: { $in: allProjectIds } }).sort({ createdAt: -1 }).lean()
     }
 
-    const data = projects.map((p) => buildProjectResponse(p as any))
+    // Enrich each project with related data
+    const data = await Promise.all(
+      projects.map(async (project) => {
+        const [createdBy, memberEntries, taskCount, memberCount] = await Promise.all([
+          User.findById(project.createdById).select('name email role').lean(),
+          ProjectMember.find({ projectId: project._id })
+            .populate('userId', 'name email role')
+            .lean(),
+          Task.countDocuments({ projectId: project._id }),
+          ProjectMember.countDocuments({ projectId: project._id }),
+        ])
+
+        // Transform populated members
+        const members = memberEntries.map((pm: any) => ({
+          ...pm,
+          populatedUser: pm.userId,
+          userId: pm.userId._id ? pm.userId._id : pm.userId,
+          projectId: project._id,
+        }))
+
+        return formatProject(project, createdBy, members, taskCount, memberCount)
+      })
+    )
 
     return NextResponse.json({ success: true, data })
   } catch (error: unknown) {
@@ -129,6 +139,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    await connectDB()
+
     const body = await request.json()
     const { title, description, memberIds } = body
 
@@ -139,30 +151,45 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Build the member list: creator + additional members
-    const memberData = [
-      { userId: auth.userId },
-      ...(memberIds?.length
-        ? memberIds.map((uid: string) => ({ userId: uid }))
-        : []),
-    ]
-
-    // Create the project with members in one transaction
-    const project = await db.project.create({
-      data: {
-        title,
-        description: description || '',
-        createdById: auth.userId,
-        members: {
-          create: memberData,
-        },
-      },
-      include: projectInclude,
+    // Create the project
+    const project = await Project.create({
+      title,
+      description: description || '',
+      createdById: auth.userId,
     })
+
+    // Add creator as a member
+    const allMemberIds = [auth.userId, ...(memberIds?.length ? memberIds : [])]
+    const uniqueMemberIds = [...new Set(allMemberIds)]
+
+    // Create member entries (skip duplicates)
+    const memberDocs = uniqueMemberIds.map(uid => ({
+      userId: uid,
+      projectId: project._id,
+    }))
+
+    await ProjectMember.insertMany(memberDocs, { ordered: false })
 
     console.log(`✅ Project created: ${title} by ${auth.email}`)
 
-    const data = buildProjectResponse(project as any)
+    // Fetch enriched project data
+    const [createdBy, memberEntries, taskCount, memberCount] = await Promise.all([
+      User.findById(project.createdById).select('name email role').lean(),
+      ProjectMember.find({ projectId: project._id })
+        .populate('userId', 'name email role')
+        .lean(),
+      Task.countDocuments({ projectId: project._id }),
+      ProjectMember.countDocuments({ projectId: project._id }),
+    ])
+
+    const members = memberEntries.map((pm: any) => ({
+      ...pm,
+      populatedUser: pm.userId,
+      userId: pm.userId._id ? pm.userId._id : pm.userId,
+      projectId: project._id,
+    }))
+
+    const data = formatProject(project, createdBy, members, taskCount, memberCount)
     return NextResponse.json({ success: true, data }, { status: 201 })
   } catch (error: unknown) {
     const err = error as Error

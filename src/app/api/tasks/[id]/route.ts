@@ -3,51 +3,68 @@
  *
  * PUT    - Update a task (admin can update all fields, members can only update status)
  * DELETE - Delete a task (admin only)
+ * Uses Mongoose + MongoDB Atlas.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import connectDB from '@/lib/mongodb'
+import Task from '@/models/Task'
+import User from '@/models/User'
+import Project from '@/models/Project'
 import { getAuthUser } from '@/lib/api-auth'
 
 /**
- * Shared Prisma include for task queries
+ * Helper: Format a Mongoose task result into the API response shape.
  */
-const taskInclude = {
-  assignedTo: { select: { id: true, name: true, email: true, role: true } },
-  project: { select: { id: true, title: true } },
-} as const
-
-/**
- * Helper: Format a Prisma task result into the API response shape.
- */
-function buildTaskResponse(task: any) {
+async function formatTask(task: any) {
   if (!task) return null
 
+  let assignedTo = task.assignedToId
+  let projectInfo = task.projectId
+
+  if (assignedTo && typeof assignedTo === 'object' && assignedTo._id) {
+    assignedTo = {
+      id: assignedTo._id.toString(),
+      name: assignedTo.name,
+      email: assignedTo.email,
+      role: assignedTo.role,
+    }
+  } else if (assignedTo && typeof assignedTo === 'string') {
+    const user = await User.findById(assignedTo).select('name email role').lean()
+    assignedTo = user
+      ? { id: user._id.toString(), name: user.name, email: user.email, role: user.role }
+      : null
+  } else {
+    assignedTo = null
+  }
+
+  if (projectInfo && typeof projectInfo === 'object' && projectInfo._id) {
+    projectInfo = {
+      id: projectInfo._id.toString(),
+      title: projectInfo.title,
+    }
+  } else if (projectInfo && typeof projectInfo === 'string') {
+    const proj = await Project.findById(projectInfo).select('title').lean()
+    projectInfo = proj ? { id: proj._id.toString(), title: proj.title } : null
+  } else {
+    projectInfo = null
+  }
+
   return {
-    id: task.id,
+    id: task._id.toString(),
     title: task.title,
     description: task.description,
     status: task.status,
     priority: task.priority,
     dueDate: task.dueDate,
-    assignedToId: task.assignedToId,
-    projectId: task.projectId,
+    assignedToId: task.assignedToId
+      ? (typeof task.assignedToId === 'object' ? task.assignedToId._id.toString() : task.assignedToId.toString())
+      : null,
+    projectId: typeof task.projectId === 'object' ? task.projectId._id.toString() : task.projectId.toString(),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    assignedTo: task.assignedTo
-      ? {
-          id: task.assignedTo.id,
-          name: task.assignedTo.name,
-          email: task.assignedTo.email,
-          role: task.assignedTo.role,
-        }
-      : null,
-    project: task.project
-      ? {
-          id: task.project.id,
-          title: task.project.title,
-        }
-      : null,
+    assignedTo,
+    project: projectInfo,
   }
 }
 
@@ -65,8 +82,10 @@ export async function PUT(
       )
     }
 
+    await connectDB()
+
     const { id } = await params
-    const task = await db.task.findUnique({ where: { id } })
+    const task = await Task.findById(id)
 
     if (!task) {
       return NextResponse.json(
@@ -80,7 +99,7 @@ export async function PUT(
 
     // Members can only update status of tasks assigned to them
     if (auth.role !== 'admin') {
-      if (task.assignedToId !== auth.userId) {
+      if (task.assignedToId?.toString() !== auth.userId) {
         return NextResponse.json(
           { success: false, error: 'You can only update tasks assigned to you' },
           { status: 403 }
@@ -104,14 +123,14 @@ export async function PUT(
     if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null
     if (assignedToId !== undefined) updateData.assignedToId = assignedToId || null
 
-    const updated = await db.task.update({
-      where: { id },
-      data: updateData,
-      include: taskInclude,
-    })
+    const updated = await Task.findByIdAndUpdate(id, updateData, { returnDocument: 'after' })
+      .populate('assignedToId', 'name email role')
+      .populate('projectId', 'title')
+      .lean()
+
     console.log(`✅ Task updated: ${id} — fields: ${Object.keys(updateData).join(', ')}`)
 
-    const data = buildTaskResponse(updated)
+    const data = await formatTask(updated)
     return NextResponse.json({ success: true, data })
   } catch (error: unknown) {
     const err = error as Error
@@ -144,8 +163,10 @@ export async function DELETE(
       )
     }
 
+    await connectDB()
+
     const { id } = await params
-    await db.task.delete({ where: { id } })
+    await Task.findByIdAndDelete(id)
 
     console.log(`✅ Task deleted: ${id}`)
 
