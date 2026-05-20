@@ -1,41 +1,28 @@
+# Work Log
+
 ---
 Task ID: 1
-Agent: Main
-Task: Complete MongoDB migration - remove all Prisma, replace with Mongoose
+Agent: Main Agent
+Task: Fix "Signup failed" error - diagnose and fix MongoDB connection issues
 
 Work Log:
-- Audited all API routes and lib files for remaining Prisma usage
-- Found every API route still imported `db` from `@/lib/db` (Prisma client)
-- Installed mongoose and mongodb-memory-server packages
-- Rewrote all 8 API route files to use Mongoose models + connectDB()
-- Deleted src/lib/db.ts (Prisma client)
-- Removed @prisma/client and prisma from package.json dependencies
-- Deleted prisma folder (schema.prisma)
-- Updated .env to include MONGODB_URI for Atlas
-- Updated mongodb.ts to read URI from mini-service file first, then env var, then in-memory fallback
-- Fixed User model duplicate index warning (removed redundant index since unique: true creates one)
-- Fixed Mongoose deprecation warning (new: true → returnDocument: 'after')
-- Added userId field to auth response objects for frontend AuthUser compatibility
-- Tested all 13 CRUD operations successfully:
-  1. Signup ✅
-  2. Login ✅
-  3. Fetch current user ✅
-  4. Create project ✅
-  5. Update project ✅
-  6. Create task ✅
-  7. Update task status ✅
-  8. List tasks ✅
-  9. Get project detail ✅
-  10. List users ✅
-  11. Delete task ✅
-  12. Delete project ✅
-  13. Logout ✅
-- Lint passes with no errors
+- Read all API route files (signup, login, logout, me, projects, projects/[id], tasks, tasks/[id], users) - confirmed ALL routes are already fully migrated to Mongoose, no Prisma remnants
+- Read all Mongoose models (User, Project, ProjectMember, Task) - all correct
+- Read auth utilities (auth.ts, api-auth.ts) - all correct
+- Tested signup API via curl - initially got connection refused (server not running)
+- Started Next.js dev server and tested signup - worked but took 10.8s on first request
+- Identified root cause: stale `/tmp/mongodb-memory-uri.txt` file pointing to dead MongoDB instance caused 10-second connection timeout before falling back to in-memory MongoDB
+- Fixed `src/lib/mongodb.ts` by adding `isPortReachable()` validation - checks if the URI file's host:port is reachable (1.5s timeout) before using it, and auto-removes stale files
+- Also reduced connection timeouts from 10s to 5s for non-Atlas connections
+- Started MongoDB mini-service at port 3031 for persistent in-memory MongoDB
+- Removed stale URI file
+- Verified all CRUD operations work: signup, login, auth/me, create project, get projects, create tasks, get tasks, update task, get project detail, get users, login test
+- Confirmed no Prisma dependencies in package.json, no Prisma config files exist
+- Confirmed lint passes with no errors
 
 Stage Summary:
-- All Prisma dependencies removed from project
-- All API routes fully migrated to Mongoose/MongoDB
-- MongoDB connection uses smart fallback: mini-service URI → env var → in-memory MongoDB
-- All CRUD operations verified working
-- Frontend UI unchanged
-- Project is now fully MongoDB Atlas / Mongoose compatible for Vercel deployment
+- Root cause: Stale MongoDB URI file caused 10s connection timeout, making signup fail with generic error
+- Fix: Added port reachability check in mongodb.ts to validate URI files before using them
+- All API routes are fully migrated to Mongoose (no Prisma remaining)
+- All CRUD operations verified working with fast response times (<1s for signup)
+- MongoDB mini-service running at port 3031 for persistent in-memory DB
