@@ -7,16 +7,13 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import User from '@/models/User'
+import { db } from '@/lib/db'
 import { verifyToken, getTokenFromCookies } from '@/lib/auth'
 
 export async function GET(request: NextRequest) {
   try {
-    // Ensure database connection
-    await connectDB()
-
-    // Extract and verify token from cookies
+    // Extract and verify token from cookies BEFORE connecting to DB
+    // This avoids unnecessary DB connections for unauthenticated requests
     const cookieHeader = request.headers.get('cookie')
     const token = getTokenFromCookies(cookieHeader)
 
@@ -30,13 +27,22 @@ export async function GET(request: NextRequest) {
     const payload = verifyToken(token)
     if (!payload) {
       return NextResponse.json(
-        { success: false, error: 'Invalid token' },
+        { success: false, error: 'Invalid or expired token' },
         { status: 401 }
       )
     }
 
     // Find user by ID from token (exclude password)
-    const user = await User.findById(payload.userId).select('-password')
+    const user = await db.user.findUnique({
+      where: { id: payload.userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true,
+      },
+    })
 
     if (!user) {
       return NextResponse.json(
@@ -47,18 +53,15 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      data: {
-        id: user._id.toString(),
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        createdAt: user.createdAt,
-      },
+      data: user,
     })
-  } catch (error) {
-    console.error('Auth me error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Auth me error:', err.message || err)
+    console.error('   Stack:', err.stack?.split('\n').slice(0, 3).join('\n'))
+
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Authentication check failed' },
       { status: 500 }
     )
   }

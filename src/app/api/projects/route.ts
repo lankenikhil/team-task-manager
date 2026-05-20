@@ -6,72 +6,67 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import Project from '@/models/Project'
-import ProjectMember from '@/models/ProjectMember'
-import Task from '@/models/Task'
-import User from '@/models/User'
+import { db } from '@/lib/db'
 import { getAuthUser } from '@/lib/api-auth'
 
 /**
- * Helper: Build a project response object with populated relations.
- * Mimics Prisma's include behavior using manual MongoDB lookups.
+ * Helper: Build a project response object using Prisma's include result.
+ * Prisma handles population automatically via include, so we just
+ * format the result to match the expected API response shape.
  */
-async function buildProjectResponse(project: InstanceType<typeof Project>) {
-  const [createdBy, members, taskCount, memberCount] = await Promise.all([
-    User.findById(project.createdById).select('name email role'),
-    ProjectMember.find({ projectId: project._id })
-      .then(async (pms) => {
-        const userIds = pms.map((pm) => pm.userId)
-        const users = await User.find({ _id: { $in: userIds } }).select('name email role')
-        const userMap = new Map(users.map((u) => [u._id.toString(), u]))
-        return pms.map((pm) => ({
-          id: pm._id.toString(),
-          userId: pm.userId.toString(),
-          projectId: pm.projectId.toString(),
-          createdAt: pm.createdAt,
-          user: userMap.get(pm.userId.toString())
-            ? {
-                id: userMap.get(pm.userId.toString())!._id.toString(),
-                name: userMap.get(pm.userId.toString())!.name,
-                email: userMap.get(pm.userId.toString())!.email,
-                role: userMap.get(pm.userId.toString())!.role,
-              }
-            : null,
-        }))
-      }),
-    Task.countDocuments({ projectId: project._id }),
-    ProjectMember.countDocuments({ projectId: project._id }),
-  ])
+function buildProjectResponse(project: Awaited<ReturnType<typeof db.project.findUnique<{ include: { createdBy: true, members: { include: { user: true } }, _count: { select: { tasks: true, members: true } } } }>>>) {
+  if (!project) return null
 
   return {
-    id: project._id.toString(),
+    id: project.id,
     title: project.title,
     description: project.description,
-    createdById: project.createdById.toString(),
+    createdById: project.createdById,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
-    createdBy: createdBy
+    createdBy: project.createdBy
       ? {
-          id: createdBy._id.toString(),
-          name: createdBy.name,
-          email: createdBy.email,
-          role: createdBy.role,
+          id: project.createdBy.id,
+          name: project.createdBy.name,
+          email: project.createdBy.email,
+          role: project.createdBy.role,
         }
       : null,
-    members,
+    members: project.members.map((pm) => ({
+      id: pm.id,
+      userId: pm.userId,
+      projectId: pm.projectId,
+      createdAt: pm.createdAt,
+      user: pm.user
+        ? {
+            id: pm.user.id,
+            name: pm.user.name,
+            email: pm.user.email,
+            role: pm.user.role,
+          }
+        : null,
+    })),
     _count: {
-      tasks: taskCount,
-      members: memberCount,
+      tasks: project._count.tasks,
+      members: project._count.members,
     },
   }
 }
 
+// Shared Prisma include for project queries
+const projectInclude = {
+  createdBy: { select: { id: true, name: true, email: true, role: true } },
+  members: {
+    include: {
+      user: { select: { id: true, name: true, email: true, role: true } },
+    },
+  },
+  _count: { select: { tasks: true, members: true } },
+} as const
+
 // GET /api/projects - List projects
 export async function GET(request: NextRequest) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -80,32 +75,37 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    let projects: InstanceType<typeof Project>[]
+    let projects
 
     if (auth.role === 'admin') {
       // Admins can see all projects
-      projects = await Project.find({}).sort({ createdAt: -1 })
+      projects = await db.project.findMany({
+        orderBy: { createdAt: 'desc' },
+        include: projectInclude,
+      })
     } else {
       // Members see only projects they created or are members of
-      const memberEntries = await ProjectMember.find({ userId: auth.userId }).select('projectId')
-      const projectIds = memberEntries.map((m) => m.projectId)
-
-      projects = await Project.find({
-        $or: [
-          { createdById: auth.userId },
-          { _id: { $in: projectIds } },
-        ],
-      }).sort({ createdAt: -1 })
+      projects = await db.project.findMany({
+        where: {
+          OR: [
+            { createdById: auth.userId },
+            { members: { some: { userId: auth.userId } } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        include: projectInclude,
+      })
     }
 
-    // Build full response for each project
-    const data = await Promise.all(projects.map(buildProjectResponse))
+    const data = projects.map((p) => buildProjectResponse(p as any))
 
     return NextResponse.json({ success: true, data })
-  } catch (error) {
-    console.error('Get projects error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Get projects error:', err.message || err)
+    console.error('   Stack:', err.stack?.split('\n').slice(0, 3).join('\n'))
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to fetch projects' },
       { status: 500 }
     )
   }
@@ -114,8 +114,6 @@ export async function GET(request: NextRequest) {
 // POST /api/projects - Create project
 export async function POST(request: NextRequest) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -141,37 +139,37 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Create the project
-    const project = await Project.create({
-      title,
-      description: description || '',
-      createdById: auth.userId,
+    // Build the member list: creator + additional members
+    const memberData = [
+      { userId: auth.userId },
+      ...(memberIds?.length
+        ? memberIds.map((uid: string) => ({ userId: uid }))
+        : []),
+    ]
+
+    // Create the project with members in one transaction
+    const project = await db.project.create({
+      data: {
+        title,
+        description: description || '',
+        createdById: auth.userId,
+        members: {
+          create: memberData,
+        },
+      },
+      include: projectInclude,
     })
 
-    // Add creator as a member
-    await ProjectMember.create({
-      userId: auth.userId,
-      projectId: project._id,
-    })
+    console.log(`✅ Project created: ${title} by ${auth.email}`)
 
-    // Add other members (if provided)
-    if (memberIds?.length) {
-      const memberDocs = memberIds.map((uid: string) => ({
-        userId: uid,
-        projectId: project._id,
-      }))
-      await ProjectMember.insertMany(memberDocs)
-    }
-
-    // Re-fetch to get timestamps
-    const savedProject = await Project.findById(project._id)
-    const data = await buildProjectResponse(savedProject!)
-
+    const data = buildProjectResponse(project as any)
     return NextResponse.json({ success: true, data }, { status: 201 })
-  } catch (error) {
-    console.error('Create project error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Create project error:', err.message || err)
+    console.error('   Stack:', err.stack?.split('\n').slice(0, 3).join('\n'))
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to create project' },
       { status: 500 }
     )
   }

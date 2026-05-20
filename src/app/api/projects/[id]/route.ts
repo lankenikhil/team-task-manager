@@ -7,91 +7,86 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import Project from '@/models/Project'
-import ProjectMember from '@/models/ProjectMember'
-import Task from '@/models/Task'
-import User from '@/models/User'
+import { db } from '@/lib/db'
 import { getAuthUser } from '@/lib/api-auth'
 
 /**
- * Helper: Build detailed project response with tasks and members populated.
+ * Shared Prisma include for detailed project queries (with tasks)
  */
-async function buildProjectDetail(project: InstanceType<typeof Project>) {
-  const [createdBy, members, tasks] = await Promise.all([
-    User.findById(project.createdById).select('name email role'),
-    ProjectMember.find({ projectId: project._id })
-      .then(async (pms) => {
-        const userIds = pms.map((pm) => pm.userId)
-        const users = await User.find({ _id: { $in: userIds } }).select('name email role')
-        const userMap = new Map(users.map((u) => [u._id.toString(), u]))
-        return pms.map((pm) => ({
-          id: pm._id.toString(),
-          userId: pm.userId.toString(),
-          projectId: pm.projectId.toString(),
-          createdAt: pm.createdAt,
-          user: userMap.get(pm.userId.toString())
-            ? {
-                id: userMap.get(pm.userId.toString())!._id.toString(),
-                name: userMap.get(pm.userId.toString())!.name,
-                email: userMap.get(pm.userId.toString())!.email,
-                role: userMap.get(pm.userId.toString())!.role,
-              }
-            : null,
-        }))
-      }),
-    Task.find({ projectId: project._id })
-      .sort({ createdAt: -1 })
-      .then(async (taskDocs) => {
-        const assigneeIds = taskDocs.filter((t) => t.assignedToId).map((t) => t.assignedToId)
-        const assignees = assigneeIds.length
-          ? await User.find({ _id: { $in: assigneeIds } }).select('name email role')
-          : []
-        const assigneeMap = new Map(assignees.map((u) => [u._id.toString(), u]))
+const projectDetailInclude = {
+  createdBy: { select: { id: true, name: true, email: true, role: true } },
+  members: {
+    include: {
+      user: { select: { id: true, name: true, email: true, role: true } },
+    },
+  },
+  tasks: {
+    orderBy: { createdAt: 'desc' as const },
+    include: {
+      assignedTo: { select: { id: true, name: true, email: true, role: true } },
+    },
+  },
+  _count: { select: { tasks: true, members: true } },
+} as const
 
-        return taskDocs.map((t) => ({
-          id: t._id.toString(),
-          title: t.title,
-          description: t.description,
-          status: t.status,
-          priority: t.priority,
-          dueDate: t.dueDate,
-          assignedToId: t.assignedToId?.toString() || null,
-          projectId: t.projectId.toString(),
-          createdAt: t.createdAt,
-          updatedAt: t.updatedAt,
-          assignedTo: t.assignedToId && assigneeMap.has(t.assignedToId.toString())
-            ? {
-                id: assigneeMap.get(t.assignedToId.toString())!._id.toString(),
-                name: assigneeMap.get(t.assignedToId.toString())!.name,
-                email: assigneeMap.get(t.assignedToId.toString())!.email,
-                role: assigneeMap.get(t.assignedToId.toString())!.role,
-              }
-            : null,
-        }))
-      }),
-  ])
+/**
+ * Helper: Format a Prisma project result into the API response shape.
+ */
+function buildProjectDetail(project: any) {
+  if (!project) return null
 
   return {
-    id: project._id.toString(),
+    id: project.id,
     title: project.title,
     description: project.description,
-    createdById: project.createdById.toString(),
+    createdById: project.createdById,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
-    createdBy: createdBy
+    createdBy: project.createdBy
       ? {
-          id: createdBy._id.toString(),
-          name: createdBy.name,
-          email: createdBy.email,
-          role: createdBy.role,
+          id: project.createdBy.id,
+          name: project.createdBy.name,
+          email: project.createdBy.email,
+          role: project.createdBy.role,
         }
       : null,
-    members,
-    tasks,
+    members: project.members.map((pm: any) => ({
+      id: pm.id,
+      userId: pm.userId,
+      projectId: pm.projectId,
+      createdAt: pm.createdAt,
+      user: pm.user
+        ? {
+            id: pm.user.id,
+            name: pm.user.name,
+            email: pm.user.email,
+            role: pm.user.role,
+          }
+        : null,
+    })),
+    tasks: project.tasks.map((t: any) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      status: t.status,
+      priority: t.priority,
+      dueDate: t.dueDate,
+      assignedToId: t.assignedToId,
+      projectId: t.projectId,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+      assignedTo: t.assignedTo
+        ? {
+            id: t.assignedTo.id,
+            name: t.assignedTo.name,
+            email: t.assignedTo.email,
+            role: t.assignedTo.role,
+          }
+        : null,
+    })),
     _count: {
-      tasks: tasks.length,
-      members: members.length,
+      tasks: project._count.tasks,
+      members: project._count.members,
     },
   }
 }
@@ -102,8 +97,6 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -113,7 +106,10 @@ export async function GET(
     }
 
     const { id } = await params
-    const project = await Project.findById(id)
+    const project = await db.project.findUnique({
+      where: { id },
+      include: projectDetailInclude,
+    })
 
     if (!project) {
       return NextResponse.json(
@@ -124,11 +120,10 @@ export async function GET(
 
     // Check access for non-admin users
     if (auth.role !== 'admin') {
-      const isMember = await ProjectMember.exists({
-        projectId: project._id,
-        userId: auth.userId,
+      const isMember = await db.projectMember.findFirst({
+        where: { projectId: id, userId: auth.userId },
       })
-      if (!isMember && project.createdById.toString() !== auth.userId) {
+      if (!isMember && project.createdById !== auth.userId) {
         return NextResponse.json(
           { success: false, error: 'Access denied' },
           { status: 403 }
@@ -136,12 +131,13 @@ export async function GET(
       }
     }
 
-    const data = await buildProjectDetail(project)
+    const data = buildProjectDetail(project)
     return NextResponse.json({ success: true, data })
-  } catch (error) {
-    console.error('Get project error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Get project error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to fetch project' },
       { status: 500 }
     )
   }
@@ -153,8 +149,6 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -171,7 +165,7 @@ export async function PUT(
     }
 
     const { id } = await params
-    const project = await Project.findById(id)
+    const project = await db.project.findUnique({ where: { id } })
 
     if (!project) {
       return NextResponse.json(
@@ -188,37 +182,50 @@ export async function PUT(
       const updateData: Record<string, string> = {}
       if (title !== undefined) updateData.title = title
       if (description !== undefined) updateData.description = description
-      await Project.findByIdAndUpdate(id, updateData)
+      await db.project.update({
+        where: { id },
+        data: updateData,
+      })
     }
 
-    // Add members (skip duplicates)
+    // Add members (upsert to skip duplicates)
     if (addMemberIds?.length) {
       for (const uid of addMemberIds) {
-        await ProjectMember.findOneAndUpdate(
-          { userId: uid, projectId: id },
-          { userId: uid, projectId: id },
-          { upsert: true }
-        )
+        await db.projectMember.upsert({
+          where: {
+            userId_projectId: { userId: uid, projectId: id },
+          },
+          update: {},
+          create: { userId: uid, projectId: id },
+        })
       }
     }
 
     // Remove members
     if (removeMemberIds?.length) {
-      await ProjectMember.deleteMany({
-        projectId: id,
-        userId: { $in: removeMemberIds },
+      await db.projectMember.deleteMany({
+        where: {
+          projectId: id,
+          userId: { in: removeMemberIds },
+        },
       })
     }
 
+    console.log(`✅ Project updated: ${id}`)
+
     // Re-fetch and return updated project
-    const updatedProject = await Project.findById(id)
-    const data = await buildProjectDetail(updatedProject!)
+    const updatedProject = await db.project.findUnique({
+      where: { id },
+      include: projectDetailInclude,
+    })
+    const data = buildProjectDetail(updatedProject)
 
     return NextResponse.json({ success: true, data })
-  } catch (error) {
-    console.error('Update project error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Update project error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to update project' },
       { status: 500 }
     )
   }
@@ -230,8 +237,6 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -249,18 +254,17 @@ export async function DELETE(
 
     const { id } = await params
 
-    // Delete project and all associated data (members + tasks)
-    await Promise.all([
-      Project.findByIdAndDelete(id),
-      ProjectMember.deleteMany({ projectId: id }),
-      Task.deleteMany({ projectId: id }),
-    ])
+    // Delete project (cascade will handle members + tasks)
+    await db.project.delete({ where: { id } })
+
+    console.log(`✅ Project deleted: ${id}`)
 
     return NextResponse.json({ success: true })
-  } catch (error) {
-    console.error('Delete project error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Delete project error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to delete project' },
       { status: 500 }
     )
   }

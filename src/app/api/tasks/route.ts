@@ -7,47 +7,46 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import Task from '@/models/Task'
-import Project from '@/models/Project'
-import ProjectMember from '@/models/ProjectMember'
-import User from '@/models/User'
+import { db } from '@/lib/db'
 import { getAuthUser } from '@/lib/api-auth'
 
 /**
- * Helper: Build a task response object with populated assignee and project.
+ * Shared Prisma include for task queries
  */
-async function buildTaskResponse(task: InstanceType<typeof Task>) {
-  const [assignedTo, project] = await Promise.all([
-    task.assignedToId
-      ? User.findById(task.assignedToId).select('name email role')
-      : null,
-    Project.findById(task.projectId).select('title'),
-  ])
+const taskInclude = {
+  assignedTo: { select: { id: true, name: true, email: true, role: true } },
+  project: { select: { id: true, title: true } },
+} as const
+
+/**
+ * Helper: Format a Prisma task result into the API response shape.
+ */
+function buildTaskResponse(task: any) {
+  if (!task) return null
 
   return {
-    id: task._id.toString(),
+    id: task.id,
     title: task.title,
     description: task.description,
     status: task.status,
     priority: task.priority,
     dueDate: task.dueDate,
-    assignedToId: task.assignedToId?.toString() || null,
-    projectId: task.projectId.toString(),
+    assignedToId: task.assignedToId,
+    projectId: task.projectId,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    assignedTo: assignedTo
+    assignedTo: task.assignedTo
       ? {
-          id: assignedTo._id.toString(),
-          name: assignedTo.name,
-          email: assignedTo.email,
-          role: assignedTo.role,
+          id: task.assignedTo.id,
+          name: task.assignedTo.name,
+          email: task.assignedTo.email,
+          role: task.assignedTo.role,
         }
       : null,
-    project: project
+    project: task.project
       ? {
-          id: project._id.toString(),
-          title: project.title,
+          id: task.project.id,
+          title: task.project.title,
         }
       : null,
   }
@@ -56,8 +55,6 @@ async function buildTaskResponse(task: InstanceType<typeof Task>) {
 // GET /api/tasks - List tasks with filters
 export async function GET(request: NextRequest) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -71,45 +68,58 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get('status')
     const priority = searchParams.get('priority')
 
-    // Build filter query
-    const filter: Record<string, unknown> = {}
+    // Build Prisma where clause
+    const where: Record<string, any> = {}
 
-    if (projectId) filter.projectId = projectId
-    if (status) filter.status = status
-    if (priority) filter.priority = priority
+    if (projectId) where.projectId = projectId
+    if (status) where.status = status
+    if (priority) where.priority = priority
 
     // Members can only see their assigned tasks
     if (auth.role !== 'admin') {
-      filter.assignedToId = auth.userId
+      where.assignedToId = auth.userId
 
       // Also restrict to projects they're part of
-      const memberEntries = await ProjectMember.find({ userId: auth.userId }).select('projectId')
-      const projectIds = memberEntries.map((m) => m.projectId)
-      const createdProjects = await Project.find({ createdById: auth.userId }).select('_id')
+      const memberEntries = await db.projectMember.findMany({
+        where: { userId: auth.userId },
+        select: { projectId: true },
+      })
+      const memberProjectIds = memberEntries.map((m) => m.projectId)
+
+      const createdProjects = await db.project.findMany({
+        where: { createdById: auth.userId },
+        select: { id: true },
+      })
       const allProjectIds = [
-        ...projectIds,
-        ...createdProjects.map((p) => p._id),
+        ...memberProjectIds,
+        ...createdProjects.map((p) => p.id),
       ]
 
       // Merge with existing projectId filter if any
-      if (filter.projectId) {
+      if (where.projectId) {
         // If a specific project is requested, ensure the member has access
-        if (!allProjectIds.some((id) => id.toString() === filter.projectId)) {
+        if (!allProjectIds.includes(where.projectId)) {
           return NextResponse.json({ success: true, data: [] })
         }
       } else {
-        filter.projectId = { $in: allProjectIds }
+        where.projectId = { in: allProjectIds }
       }
     }
 
-    const tasks = await Task.find(filter).sort({ createdAt: -1 })
-    const data = await Promise.all(tasks.map(buildTaskResponse))
+    const tasks = await db.task.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      include: taskInclude,
+    })
+
+    const data = tasks.map(buildTaskResponse)
 
     return NextResponse.json({ success: true, data })
-  } catch (error) {
-    console.error('Get tasks error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Get tasks error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to fetch tasks' },
       { status: 500 }
     )
   }
@@ -118,8 +128,6 @@ export async function GET(request: NextRequest) {
 // POST /api/tasks - Create task
 export async function POST(request: NextRequest) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -145,22 +153,28 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const task = await Task.create({
-      title,
-      description: description || '',
-      status: status || 'todo',
-      priority: priority || 'medium',
-      dueDate: dueDate ? new Date(dueDate) : null,
-      assignedToId: assignedToId || null,
-      projectId,
+    const task = await db.task.create({
+      data: {
+        title,
+        description: description || '',
+        status: status || 'todo',
+        priority: priority || 'medium',
+        dueDate: dueDate ? new Date(dueDate) : null,
+        assignedToId: assignedToId || null,
+        projectId,
+      },
+      include: taskInclude,
     })
 
-    const data = await buildTaskResponse(task)
+    console.log(`✅ Task created: ${title} in project ${projectId}`)
+
+    const data = buildTaskResponse(task)
     return NextResponse.json({ success: true, data }, { status: 201 })
-  } catch (error) {
-    console.error('Create task error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Create task error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to create task' },
       { status: 500 }
     )
   }

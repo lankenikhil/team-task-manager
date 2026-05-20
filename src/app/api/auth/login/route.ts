@@ -6,15 +6,11 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import User from '@/models/User'
+import { db } from '@/lib/db'
 import { comparePassword, signToken } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
-    // Ensure database connection
-    await connectDB()
-
     const body = await request.json()
     const { email, password } = body
 
@@ -27,8 +23,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Find user by email
-    const user = await User.findOne({ email })
+    const user = await db.user.findUnique({ where: { email } })
     if (!user) {
+      console.log(`⚠️ Login attempt with unregistered email: ${email}`)
       return NextResponse.json(
         { success: false, error: 'Invalid email or password' },
         { status: 401 }
@@ -38,15 +35,18 @@ export async function POST(request: NextRequest) {
     // Verify password
     const valid = await comparePassword(password, user.password)
     if (!valid) {
+      console.log(`⚠️ Invalid password for user: ${email}`)
       return NextResponse.json(
         { success: false, error: 'Invalid email or password' },
         { status: 401 }
       )
     }
 
+    console.log(`✅ User logged in: ${email} (${user.role})`)
+
     // Generate JWT token
     const token = signToken({
-      userId: user._id.toString(),
+      userId: user.id,
       email: user.email,
       role: user.role,
     })
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
       success: true,
       data: {
         user: {
-          id: user._id.toString(),
+          id: user.id,
           name: user.name,
           email: user.email,
           role: user.role,
@@ -75,10 +75,13 @@ export async function POST(request: NextRequest) {
     })
 
     return response
-  } catch (error) {
-    console.error('Login error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Login error:', err.message || err)
+    console.error('   Stack:', err.stack?.split('\n').slice(0, 3).join('\n'))
+
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Login failed. Please try again.' },
       { status: 500 }
     )
   }

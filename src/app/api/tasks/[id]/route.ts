@@ -6,46 +6,46 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import connectDB from '@/lib/mongodb'
-import Task from '@/models/Task'
+import { db } from '@/lib/db'
 import { getAuthUser } from '@/lib/api-auth'
 
-// Helper to build task response with populated relations (reused from tasks/route.ts)
-async function buildTaskResponse(task: InstanceType<typeof Task>) {
-  // Dynamic import to avoid circular deps — use the User and Project models directly
-  const User = (await import('@/models/User')).default
-  const Project = (await import('@/models/Project')).default
+/**
+ * Shared Prisma include for task queries
+ */
+const taskInclude = {
+  assignedTo: { select: { id: true, name: true, email: true, role: true } },
+  project: { select: { id: true, title: true } },
+} as const
 
-  const [assignedTo, project] = await Promise.all([
-    task.assignedToId
-      ? User.findById(task.assignedToId).select('name email role')
-      : null,
-    Project.findById(task.projectId).select('title'),
-  ])
+/**
+ * Helper: Format a Prisma task result into the API response shape.
+ */
+function buildTaskResponse(task: any) {
+  if (!task) return null
 
   return {
-    id: task._id.toString(),
+    id: task.id,
     title: task.title,
     description: task.description,
     status: task.status,
     priority: task.priority,
     dueDate: task.dueDate,
-    assignedToId: task.assignedToId?.toString() || null,
-    projectId: task.projectId.toString(),
+    assignedToId: task.assignedToId,
+    projectId: task.projectId,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    assignedTo: assignedTo
+    assignedTo: task.assignedTo
       ? {
-          id: assignedTo._id.toString(),
-          name: assignedTo.name,
-          email: assignedTo.email,
-          role: assignedTo.role,
+          id: task.assignedTo.id,
+          name: task.assignedTo.name,
+          email: task.assignedTo.email,
+          role: task.assignedTo.role,
         }
       : null,
-    project: project
+    project: task.project
       ? {
-          id: project._id.toString(),
-          title: project.title,
+          id: task.project.id,
+          title: task.project.title,
         }
       : null,
   }
@@ -57,8 +57,6 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -68,7 +66,7 @@ export async function PUT(
     }
 
     const { id } = await params
-    const task = await Task.findById(id)
+    const task = await db.task.findUnique({ where: { id } })
 
     if (!task) {
       return NextResponse.json(
@@ -82,7 +80,7 @@ export async function PUT(
 
     // Members can only update status of tasks assigned to them
     if (auth.role !== 'admin') {
-      if (task.assignedToId?.toString() !== auth.userId) {
+      if (task.assignedToId !== auth.userId) {
         return NextResponse.json(
           { success: false, error: 'You can only update tasks assigned to you' },
           { status: 403 }
@@ -98,7 +96,7 @@ export async function PUT(
     }
 
     // Build update object with only provided fields
-    const updateData: Record<string, unknown> = {}
+    const updateData: Record<string, any> = {}
     if (title !== undefined) updateData.title = title
     if (description !== undefined) updateData.description = description
     if (status !== undefined) updateData.status = status
@@ -106,14 +104,20 @@ export async function PUT(
     if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null
     if (assignedToId !== undefined) updateData.assignedToId = assignedToId || null
 
-    const updated = await Task.findByIdAndUpdate(id, updateData, { new: true })
-    const data = await buildTaskResponse(updated!)
+    const updated = await db.task.update({
+      where: { id },
+      data: updateData,
+      include: taskInclude,
+    })
+    console.log(`✅ Task updated: ${id} — fields: ${Object.keys(updateData).join(', ')}`)
 
+    const data = buildTaskResponse(updated)
     return NextResponse.json({ success: true, data })
-  } catch (error) {
-    console.error('Update task error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Update task error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to update task' },
       { status: 500 }
     )
   }
@@ -125,8 +129,6 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectDB()
-
     const auth = getAuthUser(request)
     if (!auth) {
       return NextResponse.json(
@@ -143,13 +145,16 @@ export async function DELETE(
     }
 
     const { id } = await params
-    await Task.findByIdAndDelete(id)
+    await db.task.delete({ where: { id } })
+
+    console.log(`✅ Task deleted: ${id}`)
 
     return NextResponse.json({ success: true })
-  } catch (error) {
-    console.error('Delete task error:', error)
+  } catch (error: unknown) {
+    const err = error as Error
+    console.error('❌ Delete task error:', err.message || err)
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Failed to delete task' },
       { status: 500 }
     )
   }

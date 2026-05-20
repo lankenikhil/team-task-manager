@@ -30,17 +30,10 @@ const ProjectMemberSchema = new Schema<IProjectMember>(
     },
   },
   {
-    timestamps: false,
+    // Enable timestamps to get createdAt automatically
+    timestamps: { createdAt: true, updatedAt: false },
   }
 )
-
-// Add createdAt manually since we disabled timestamps
-ProjectMemberSchema.pre('save', function (next) {
-  if (!this.createdAt) {
-    this.createdAt = new Date()
-  }
-  next()
-})
 
 // Compound unique index — a user can only be a member of a project once
 ProjectMemberSchema.index({ userId: 1, projectId: 1 }, { unique: true })
@@ -48,6 +41,7 @@ ProjectMemberSchema.index({ userId: 1, projectId: 1 }, { unique: true })
 // Index for faster lookups by project
 ProjectMemberSchema.index({ projectId: 1 })
 
+// Prevent re-compilation in development (hot reload safety)
 const ProjectMember =
   mongoose.models.ProjectMember || mongoose.model<IProjectMember>('ProjectMember', ProjectMemberSchema)
 
